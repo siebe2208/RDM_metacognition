@@ -317,6 +317,7 @@ combined_RT <- m_rtint|m_rtslope + plot_layout(heights = 0.5)+
   plot_annotation(title = "RT marginal Posteriors", 
                   theme = theme(
                     plot.title = element_text(size = 24, face = "bold", hjust = 0.5)))
-combined_RT
+combined_RT 
+1
 
   
