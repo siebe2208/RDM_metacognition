@@ -34,7 +34,7 @@ def setup_logging(sID: int):
     log_file = config.logs_dir / f"sub-{sID:04d}_preprocessing.log"
     
     logging.basicConfig(
-        level=getattr(logging, config.log:log_level),
+        level=getattr(logging, config.log.log_level), #possible mistake
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file) if config.save_logs else logging.NullHandler(),

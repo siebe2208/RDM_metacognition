@@ -73,7 +73,12 @@ posterior = draws %>%
   x = list(x)) %>% unnest(x)
 
 draws_psych = posterior %>% filter(draw%in% draw_id) %>% 
-  mutate(y_pred = psycho_ACC(x, alpha, beta, lapse))
+  mutate(y_pred = psycho_ACC(x, alpha, beta, lapse))%>%
+  group_by(x) %>%
+  summarize(
+    ymin = min(y_pred),
+    ymax = max(y_pred),
+  )
 
 # median parameters psychometric function 
 med_alpha = median(posterior$alpha)
@@ -152,8 +157,8 @@ data_main = data_main %>% rowwise() %>%
 ## Plots binary choice
 type_1_p = ggplot() +
             geom_point(data = data_main, aes(x = coherence, y = up), color = "red", size = 2, shape = 16, alpha = 0.7) +
-            geom_line(data = draws_psych, aes(x=x, y = y_pred, group = draw), col = "black", alpha = 0.05)+
-            geom_line(aes(x=x, y=y_pred_med), color = "black", size = 0.7, alpha = 1)+
+            geom_ribbon(data = draws_psych, aes(x=x, ymin = ymin, ymax = ymax), col = "grey", alpha = 0.2)+
+            geom_line(aes(x=x, y=y_pred_med), color = "black", size = 1.2, alpha = 1)+
             labs(x = "Coherence", y = "P('up')", title = "Type 1") +
             theme_minimal()+
             theme(plot.title = element_text(hjust = 0.5, size = 16),
@@ -233,7 +238,7 @@ conf_res = ggplot() +
 
 conf_p + conf_res
 
-## Plot marginal distributions
+## Plot marginal distributions for Type 1
 m_alpha = ggplot(data = draws, aes(x=alpha))+
   geom_histogram(bins =100, fill = "skyblue", color = "black")+
   scale_x_continuous(limits = c(min(draws$alpha)-0.1, max(draws$alpha)+0.1))+
@@ -283,10 +288,10 @@ combined_T1 <- (m_alpha | m_beta) / m_lapse + plot_layout(heights = c(2,1))+
                     plot.title = element_text(size = 24, face = "bold", hjust = 0.5)))
 combined_T1
 
-
+## Plot marginal distributions for RT
 m_rtint = ggplot(data = draws, aes(x=exp(rt_int)))+
             geom_histogram(bins =100, fill = "goldenrod2", color = "black")+
-            scale_x_continuous(limits = c(exp(min(draws$rt_int))-0.2, exp(max(draws$rt_int)))+0.1)+
+            scale_x_continuous(limits = c(0, exp(max(draws$rt_int))+0.1))+
             scale_y_continuous(expand = expansion(mult = c(0,0.05)))+
             labs(x = NULL, y = "posterior draws", title = "RT intercept no NDT")+
             theme_minimal()+
@@ -300,7 +305,7 @@ m_rtint = ggplot(data = draws, aes(x=exp(rt_int)))+
 
 m_rtslope = ggplot(data = draws, aes(x=rt_slope))+
               geom_histogram(bins =100, fill = "goldenrod2", color = "black")+
-              scale_x_continuous(limits = c(min(draws$rt_slope)-0.2, max(draws$rt_slope))+0.1)+
+              scale_x_continuous(limits = c(min(draws$rt_slope)-0.2, max(draws$rt_slope)+0.1))+
               scale_y_continuous(expand = expansion(mult = c(0,0.05)))+
               labs(x = NULL, y = "posterior draws", title = "RT slope (log space)")+
               theme_minimal()+
@@ -313,11 +318,60 @@ m_rtslope = ggplot(data = draws, aes(x=rt_slope))+
                     panel.border = element_rect(color = "black", fill = NA, size = 3))
 
 
-combined_RT <- m_rtint|m_rtslope + plot_layout(heights = 0.5)+
+combined_RT <- (m_rtint|m_rtslope) + plot_layout(heights = 0.5)+
   plot_annotation(title = "RT marginal Posteriors", 
                   theme = theme(
                     plot.title = element_text(size = 24, face = "bold", hjust = 0.5)))
 combined_RT 
-1
 
+## Plot marginal distributions for confidence
+m_metaun = ggplot(data = draws, aes(x=exp(meta_un)))+
+  geom_histogram(bins =100, fill = "palegreen", color = "black")+
+  scale_x_continuous(limits = c(exp(min(draws$meta_un))-0.1, exp(max(draws$meta_un))+0.1))+
+  scale_y_continuous(expand = expansion(mult = c(0,0.05)))+
+  labs(x = NULL, y = "posterior draws", title = "Meta Uncertainty")+
+  theme_minimal()+
+  theme(plot.title = element_textbox(size = 20,
+                                     color = "black", fill = NA, box.color = "black",
+                                     halign = 0.5, linetype = 1, linewidth = 1.5, r = unit(5, "pt"), width = unit(1, "npc"),
+                                     padding = margin(5, 0, 5, 0), margin = margin(0, 0, 5, 0)),
+        axis.title = element_text(size = 16),                 
+        axis.text = element_text(size = 14),
+        panel.border = element_rect(color = "black", fill = NA, size = 3))
+
+
+m_metabias = ggplot(data = draws, aes(x=meta_bias))+
+  geom_histogram(bins =100, fill = "palegreen", color = "black")+
+  scale_x_continuous(limits = c(min(draws$meta_bias)-0.2, max(draws$meta_bias)+0.1))+
+  scale_y_continuous(expand = expansion(mult = c(0,0.05)))+
+  labs(x = NULL, y = "posterior draws", title = "Meta Bias (logit space)")+
+  theme_minimal()+
+  theme(plot.title = element_textbox(size = 20,
+                                     color = "black", fill = NA, box.color = "black",
+                                     halign = 0.5, linetype = 1, linewidth = 1.5, r = unit(5, "pt"), width = unit(1, "npc"),
+                                     padding = margin(5, 0, 5, 0), margin = margin(0, 0, 5, 0)),
+        axis.title = element_text(size = 16),                 
+        axis.text = element_text(size = 14),
+        panel.border = element_rect(color = "black", fill = NA, size = 3))
+
+
+combined_conf<- (m_metaun|m_metabias) + plot_layout(heights = 0.5)+
+  plot_annotation(title = "Metacognition marginal Posteriors", 
+                  theme = theme(
+                    plot.title = element_text(size = 24, face = "bold", hjust = 0.5)))
+combined_conf 
+
+## Plot marginal distributions for ALL
+
+all_posteriors <- (m_alpha | m_beta | m_lapse) /
+  (m_rtint | m_rtslope | patchwork::plot_spacer()) /  
+  (m_metaun | m_metabias | patchwork::plot_spacer()) +
+  plot_annotation(
+    title = "All (non constant) Posterior Marginals",
+    theme = theme(
+      plot.title = element_text(size = 28, face = "bold", hjust = 0.5)
+    )
+  )
+
+all_posteriors
   
