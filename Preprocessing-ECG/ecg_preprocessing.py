@@ -6,47 +6,32 @@ Author: Kelly Hoogervorst and Siebe Everaerts
 Version: 1.0
 """
 
+# Import packages
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from scipy import signal
+from scipy.signal import find_peaks
 from scipy.interpolate import CubicSpline, interp1d
 from scipy.stats import median_abs_deviation
-import logging
+import neurokit2 as nk
 import warnings
 from typing import Tuple, Dict, List, Optional
 from dataclasses import dataclass
 import json
+import sys
 
-# Import configuration
+# Import coupled scripts
 import config
+import ecg_helpers
 
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# Logging setup
-# ============================================================================
-
-def setup_logging(sID: int):
-    """Setup logging for the preprocessing pipeline."""
-    log_file = config.logs_dir / f"sub-{sID:04d}_preprocessing.log"
-    
-    logging.basicConfig(
-        level=getattr(logging, config.log.log_level), #possible mistake
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file) if config.save_logs else logging.NullHandler(),
-            logging.StreamHandler()
-        ]
-    )
-    return logging.getLogger(__name__)
-
-# ============================================================================
 # initialise data structures
 # ============================================================================
-
 @dataclass
 class ECGData:
     """Container for raw ECG data."""
@@ -64,219 +49,203 @@ class PreprocessedECG:
     artifacts_mask: np.ndarray
     rr_corrected: np.ndarray
     metadata: Dict
-    
+
+
 # ============================================================================
 # Load data
 # ============================================================================
 
-def load_ecg_data(participant_id: int, logger) -> Tuple[ECGData, pd.DataFrame]:
-    """
-    Load ECG and behavioral data for a participant.
-    
-    Parameters
-    ----------
-    participant_id : int
-        Participant ID (e.g., 263)
-    logger : logging.Logger
-        Logger instance
-        
-    Returns
-    -------
-    ecg_data : ECGData
-        Raw ECG data
-    behavioral_data : pd.DataFrame
-        Behavioral data
-    """
-    # Construct file paths
-    ecg_filename = config.physio_filenames.format(participant_id=participant_id)
-    behavioral_filename = config.behavioral_filenames.format(participant_id=participant_id)
-    
-    ecg_path = config.raw_dir / ecg_filename
-    behavioral_path = config.raw_dir / behavioral_filename
-    
-    # Load ECG data
-    if not ecg_path.exists():
-        raise FileNotFoundError(f"ECG file not found: {ecg_path}") # warning if path does not exist
-    
-    try:
-        ecg_data_dict = np.load(ecg_path, allow_pickle=True)
-        ecg_signal = ecg_data_dict['ECG_conv']  # Converted ECG data in mV
-        logger.info(f"Loaded ECG data: {len(ecg_signal)} samples")
-    except Exception as e:
-        logger.error(f"Failed to load ECG data: {e}")
-        raise
-    
-    # Load behavioral data
-    if not behavioral_path.exists():
-        raise FileNotFoundError(f"Behavioral file not found: {behavioral_path}")
-    
-    try:
-        behavioral_data = pd.read_csv(behavioral_path)
-        logger.info(f"Loaded behavioral data: {len(behavioral_data)} trials")
-    except Exception as e:
-        logger.error(f"Failed to load behavioral data: {e}")
-        raise
-    
-    # Create timestamps
-    timestamps = np.arange(len(ecg_signal)) / config.sampling_rate
-    
-    ecg_data = ECGData(
-        ecg_signal=ecg_signal,
-        sampling_frequency=config.sampling_rate,
-        timestamps=timestamps
-    )
-    
-    return ecg_data, behavioral_data
+def load_all_ecg_data():
+    """Loop over all subjects in config.sIDs and load ECG + behavioural data."""
+    results = {}
+
+    for sID in config.sIDs:
+        # Construct file paths
+        ecg_filename = config.physio_filenames.format(sID=sID, task=config.task)
+        behavioural_filename = config.behavioural_filenames.format(sID=sID, task=config.task)
+
+        ecg_path = config.raw_dir / ecg_filename
+        behavioural_path = config.raw_dir / behavioural_filename
+
+        # Load ECG data
+        if not ecg_path.exists():
+            continue
+        try:
+            ecg_df = pd.read_csv(ecg_path, sep="\t", compression="gzip")
+            # Assuming the ECG signal is in a column named "ECG_conv"
+            ecg_signal = ecg_df["ECG_conv"].values
+        except Exception:
+            continue
+
+        # Load behavioural data
+        if not behavioural_path.exists():
+            continue
+
+        try:
+            behavioural_data = pd.read_csv(behavioural_path)
+        except Exception:
+            continue
+
+        # Create timestamps
+        timestamps = np.arange(len(ecg_signal)) / config.sampling_freq
+
+        ecg_data = ECGData(
+            ecg_signal=ecg_signal,
+            sampling_frequency=config.sampling_freq,
+            timestamps=timestamps
+        )
+
+        # Store results in dictionary keyed by subject ID
+        results[sID] = (ecg_data, behavioural_data)
+
+    return results
+
+# Plot raw ECG data (full duration + x amount of seconds)
+if config.plot_raw_data:
+    ecg_helpers.plot_raw(results, short_seconds=60)
 
 
 # ============================================================================
 # FILTERING
 # ============================================================================
 
-def design_filters() -> Tuple:
-    """
-    Design filtering cascade: high-pass, low-pass, and notch filters.
-    
-    Returns
-    -------
-    sos_hp, sos_lp, sos_notch : scipy.signal filter objects
-        Second-order sections for cascade filtering
-    """
-    fs = config.SAMPLING_FREQUENCY
-    
-    # High-pass filter design
-    sos_hp = signal.butter(
-        config.HIGHPASS_ORDER,
-        config.HIGHPASS_CUTOFF,
-        btype='high',
-        fs=fs,
-        output='sos'
-    )
-    
-    # Low-pass filter design
-    sos_lp = signal.butter(
-        config.LOWPASS_ORDER,
-        config.LOWPASS_CUTOFF,
-        btype='low',
-        fs=fs,
-        output='sos'
-    )
-    
-    # Notch filter design for power-line interference
-    sos_notch = signal.iirnotch(
-        config.NOTCH_FREQUENCY,
-        Q=config.NOTCH_Q,
-        fs=fs,
-        output='sos'
-    )
-    
-    return sos_hp, sos_lp, sos_notch
+# Build filter using helper function
+filters = ecg_helpers.design_filters_simple(config)
 
-def apply_filters(ecg_signal: np.ndarray, logger) -> Tuple[np.ndarray, Dict]:
+# Filter the data
+def apply_filters_simple(ecg_signal: np.ndarray):
     """
-    Apply filtering cascade to ECG signal.
-    
-    Parameters
-    ----------
-    ecg_signal : np.ndarray
-        Raw ECG signal (mV)
-    logger : logging.Logger
-        Logger instance
-        
-    Returns
-    -------
-    ecg_filtered : np.ndarray
-        Filtered ECG signal
-    filter_info : Dict
-        Information about applied filters
+    Apply filters in three explicit steps: high-pass -> low-pass -> notch.
+    Returns the final filtered signal and a simple info dict.
     """
-    logger.info("Applying filter cascade...")
+    # 1) High-pass
+    ecg_hp = signal.sosfiltfilt(filters["highpass"]["sos"], ecg_signal)
     
-    sos_hp, sos_lp, sos_notch = design_filters()
+    # 2) Low-pass
+    ecg_lp = signal.sosfiltfilt(filters["lowpass"]["sos"], ecg_hp)
     
-    # Apply high-pass filter
-    ecg_hp = signal.sosfiltfilt(sos_hp, ecg_signal)
+    # 3) Notch
+    ecg_filtered = signal.sosfiltfilt(filters["notch"]["sos"], ecg_lp)
     
-    # Apply low-pass filter
-    ecg_lp = signal.sosfiltfilt(sos_lp, ecg_hp)
-    
-    # Apply notch filter
-    ecg_filtered = signal.sosfiltfilt(sos_notch, ecg_lp)
-    
-    filter_info = {
-        'highpass_cutoff': config.HIGHPASS_CUTOFF,
-        'lowpass_cutoff': config.LOWPASS_CUTOFF,
-        'notch_frequency': config.NOTCH_FREQUENCY,
-        'notch_q': config.NOTCH_Q,
+    # 4) Return filtered signal + parameters used
+    info = {
+        "sampling_freq": filters["fs"],
+        "highpass_cutoff": filters["highpass"]["cutoff"],
+        "highpass_order": filters["highpass"]["order"],
+        "lowpass_cutoff": filters["lowpass"]["cutoff"],
+        "lowpass_order": filters["lowpass"]["order"],
+        "notch_frequency": filters["notch"]["freq"],
+        "notch_q": filters["notch"]["q"],
     }
     
-    logger.info("Filter cascade applied successfully")
+    return ecg_filtered, info
+
+# Plot raw vs filtered comparison
+if config.plot_filtered_data:
+    ecg_helpers.plot_raw_vs_filtered(ecg_data, ecg_filtered, max_seconds=60)
     
-    return ecg_filtered, filter_info
 
 # ============================================================================
-# DOWNSAMPLING
+# Downsampling
 # ============================================================================
 
-def downsample(ecg_filtered: np.ndarray, logger) -> Tuple[np.ndarray, Dict]:
-    """
-    Downsample the ECG signal .
+# Downsample the ECG signal.
+"""
+Parameters
+----------
+ecg_filtered : np.ndarray
+    filtered ECG signal (mV)
     
-    Parameters
-    ----------
-    ecg_filtered : np.ndarray
-        filtered ECG signal (mV)
-    logger : logging.Logger
-        Logger instance
-        
-    Returns
-    -------
-    ecg_downsampled : np.ndarray
-        Downsampled ECG signal
-    downsample_info : Dict
-        Information about downsampling procedure
-    """
+Returns
+-------
+ecg_downsampled : np.ndarray
+    Downsampled ECG signal
+downsample_info : Dict
+    Information about downsampling procedure
+"""
+# Retrieve parameters from config
+fs = config.sampling_freq
+target_fs = config.downsampling_freq
+method = config.downsampling_method
 
-    logger.info("Downsampling started...")
+# Apply downsampling using helper function
+ecg_downsampled, downsample_info = ecg_helpers.apply_downsampling(
+    signal_data=ecg_filtered,
+    original_fs=fs,
+    target_fs=target_fs,
+    method=method
+)
+    
 
-    # Retrieve original and target sampling frequencies from config 
-    fs = config.SAMPLING_FREQUENCY           # Original sampling frequency (Hz)                 
-    target_fs = config.DOWNSAMPLING_FREQUENCY  # Desired downsampled frequency (Hz)
+# Plot filtered vs downsampled
+if config.plot_downsampled_data:
+    ecg_helpers.plot_filtered_vs_downsampled(ecg_data, ecg_filtered, ecg_downsampled, max_seconds=60)
+    
 
-    # Compute the downsampling factor
-    factor = fs / target_fs
-    
-    # Retrieve the chosen downsampling method from configuration
-    method = config.DOWNSAMPLING_METHOD
-    
-    # Check that the target sampling frequency is lower than the original
-    if target_fs >= fs:
-        raise ValueError("target sampling frequency must be strictly lower than current sampling frequency for downsampling.")
-    
-    # Apply downsampling based on chosen method
-    if method == "poly":
-        ecg_downsampled = signal.resample_poly(ecg_filtered, up = target_fs, down = fs)
-    
-    elif method == "decimate":
-        factor_int = int(round(factor))
-        ecg_downsampled = signal.decimate(ecg_filtered, factor_int, ftype='iir', zero_phase=True)
-    
-    elif method == "resample":
-        num_samples = int(len(ecg_filtered) * target_fs / fs)
-        ecg_downsampled = signal.resample(ecg_filtered, num_samples)
+# ============================================================================
+# QRS detection 
+# ============================================================================
 
-    else:
-        # Raise error if an unknown method is specified
-        raise ValueError(f"Unknown method '{method}'. Choose from ['poly', 'decimate', 'resample']")
-    
-    # Create dictionary with downsampling info
-    downsample_info = {"downsampling_method": method,
-                       "old_sampling_frequency": fs,
-                       "new_sampling_frequency": target_fs,
-                       "downsampled_by_factor": factor}
-    
-    logger.info("Downsampling applied succesfully")
+# early peak detection
+early_segment = ecg_downsampled[:500]
+early_peaks, _ = find_peaks(
+    early_segment,
+    distance=int(0.2 * config.downsampling_freq),  # ~200ms min RR at downsampled rate (adjust if needed)
+    height=np.mean(early_segment[:100]) + 4 * np.std(early_segment[:100])
+)
 
-    return ecg_downsampled, downsample_info
+# R-peak detection with built-in artifact correction
+signals, info = nk.ecg_peaks(
+    ecg_downsampled,
+    sampling_rate= config.downsampling_freq,
+    correct_artifacts=True  # uses Kubios-style correction
+)
+# R-peak sample indices
+rpeaks = info["ECG_R_Peaks"]
 
+if len(early_peaks) > 0:
+    # Avoid duplicates: remove early_peaks already detected by NK
+    early_new = early_peaks[~np.isin(early_peaks, rpeaks)]
     
+    if len(early_new) > 0:
+        # Sort and insert at beginning
+        early_new = np.sort(early_new)
+        rpeaks = np.insert(rpeaks, 0, early_new)
+        print(f"Added {len(early_new)} early peaks from first 500 samples")
+
+# Final R-peak indices (with early enhancement)
+rpeaks_final = np.unique(rpeaks)  # remove any theoretical duplicates
+print(f"Total R-peaks detected: {len(rpeaks_final)}")
+
+# Optional: quick diagnostic plot
+if config.plot_rpeaks:
+    ecg_helpers.plot_rpeaks_segment(ecg_downsampled, rpeaks_final, config.downsampling_freq, duration_sec = 30.0)
+
+# ============================================================================
+# Artifact correction 
+# ============================================================================
+
+
+
+
+# ============================================================================
+# Epoching 
+# ============================================================================
+
+# load relevant data for function
+if config.epoch_method == 'stamps':
+   trial_timing_data = behavioural_data['TrialStart'].to_numpy()
+# ADD FOR OTHER METHODS
+
+# Epoch ECG signal with the helper functions
+result = ecg_helpers.detect_trial_timing(config, trial_timing_data)
+trial_samples = result['samples']
+
+
+# ============================================================================
+# Time-domain analysis 
+# ============================================================================
+
+
+
+
