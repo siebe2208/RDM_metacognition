@@ -13,6 +13,7 @@ import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
 import neurokit2 as nk
+import pandas as pd
 
 
 
@@ -382,6 +383,24 @@ def _validate_timing(pd_peaks, stamp_samples):
         correlation = np.nan
     
     return correlation
+
+
+# ============================================================================
+# Artifact removal
+# ============================================================================
+
+def artifact_correction(rpeaks: np.ndarray, 
+                        fs: float,
+                        plot = False):
+
+    # Define main algorithm 
+    artifacts, peaks_clean = nk.signal_fixpeaks(rpeaks, sampling_rate = fs, iterative = True, show = plot)
+
+    # Optimize suboptimal artifact correction by "kubios"
+    corrected = [n for o, n in zip(rpeaks, peaks_clean) if o !=n]
+
+    return corrected, artifacts
+
 
 
 # ============================================================================
